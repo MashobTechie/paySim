@@ -4,9 +4,10 @@
 insurance payment workflows, injecting failures, inspecting event processing, replaying
 scenarios and verifying that payment systems behave correctly under failure.
 
-> **Status: foundation only.** The monorepo, API and web shells, database connectivity and
-> health checks are in place. No payment functionality exists yet. See
-> [docs/architecture.md](docs/architecture.md#7-not-implemented-yet).
+> **Status: Phase 3 complete.** The monorepo, API and web shells, the payment lifecycle design
+> and the database (schema, integrity enforcement, migrations and verification suite) are in
+> place. Payment services and endpoints are not implemented yet. See
+> [docs/phase-3-handover.md](docs/phase-3-handover.md).
 
 All data is synthetic. PaySim does not connect to any real bank or payment provider.
 
@@ -40,18 +41,21 @@ curl localhost:4000/health
 
 ## Scripts
 
-| Command            | What it does                                                                                   |
-| ------------------ | ---------------------------------------------------------------------------------------------- |
-| `pnpm dev`         | Builds packages, generates the Prisma client, runs everything in watch mode                    |
-| `pnpm build`       | Production build of all workspaces                                                             |
-| `pnpm lint`        | ESLint across all workspaces                                                                   |
-| `pnpm typecheck`   | `tsc --noEmit` across all workspaces                                                           |
-| `pnpm test`        | Vitest suites                                                                                  |
-| `pnpm format`      | Prettier write (`format:check` to verify)                                                      |
-| `pnpm db:up/down`  | Start or stop PostgreSQL                                                                       |
-| `pnpm db:generate` | Regenerate the Prisma client                                                                   |
-| `pnpm db:migrate`  | `prisma migrate dev` (no models yet)                                                           |
-| `pnpm db:status`   | `prisma migrate status` (checks connectivity; exits non-zero until the first migration exists) |
+| Command                      | What it does                                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                   | Builds packages, generates the Prisma client, runs everything in watch mode                               |
+| `pnpm build`                 | Production build of all workspaces                                                                        |
+| `pnpm lint`                  | ESLint across all workspaces                                                                              |
+| `pnpm typecheck`             | `tsc --noEmit` across all workspaces                                                                      |
+| `pnpm test`                  | Vitest suites                                                                                             |
+| `pnpm format`                | Prettier write (`format:check` to verify)                                                                 |
+| `pnpm db:up/down`            | Start or stop PostgreSQL                                                                                  |
+| `pnpm db:generate`           | Regenerate the Prisma client                                                                              |
+| `pnpm db:migrate --name <x>` | Create a new migration **without applying it** (`--create-only`); review it before applying               |
+| `pnpm db:migrate:deploy`     | Apply all migrations to the database in `DATABASE_URL`                                                    |
+| `pnpm db:status`             | `prisma migrate status` (checks connectivity and pending migrations)                                      |
+| `pnpm test:db`               | Database integration suite against an isolated `paysim_test` database ([guide](docs/testing-database.md)) |
+| `pnpm db:test:reset`         | Drop, recreate and migrate the test database                                                              |
 
 ## Layout
 
