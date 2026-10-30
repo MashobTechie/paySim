@@ -18,8 +18,11 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:generate": "pnpm --filter @paysim/api exec prisma generate",
-    "db:migrate": "pnpm --filter @paysim/api exec prisma migrate dev",
-    "db:status": "pnpm --filter @paysim/api exec prisma migrate status"
+    "db:migrate": "pnpm --filter @paysim/api exec prisma migrate dev --create-only",
+    "db:status": "pnpm --filter @paysim/api exec prisma migrate status",
+    "test:db": "pnpm --filter @paysim/api test:db",
+    "db:test:reset": "pnpm --filter @paysim/api db:test:reset",
+    "db:migrate:deploy": "pnpm --filter @paysim/api exec prisma migrate deploy"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
