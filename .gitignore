@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# generated
+apps/api/src/generated/
+
+# turbo
+.turbo/
+
+# env — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# logs / os / editor
+*.log
+.DS_Store
+coverage/
+.idea/

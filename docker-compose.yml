@@ -1,0 +1,23 @@
+name: paysim
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: paysim-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-paysim}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-paysim}
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - paysim-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  paysim-pgdata:

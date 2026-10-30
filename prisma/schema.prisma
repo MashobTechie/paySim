@@ -1,0 +1,20 @@
+// PaySim database schema.
+//
+// Intentionally empty: the payment, claim and event data models will be designed
+// separately (see docs/payment-lifecycle.md) before any models are added here.
+//
+// Rules that will govern every model added to this file:
+//   - Monetary amounts are stored as integer minor units (BigInt) or Decimal — never Float.
+//   - Payment events are append-only and carry their own identifiers for traceability.
+//   - Idempotency keys are enforced with unique constraints, not application checks alone.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../apps/api/src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
