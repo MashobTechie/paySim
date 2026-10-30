@@ -64,15 +64,4 @@ packages/test-engine    reserved: scenario execution and assertions
 prisma/               schema (no models yet) and migrations
 docs/                 architecture, product requirements, payment lifecycle
 ```
-
-## Troubleshooting
-
-**`OS file watch limit reached` from `pnpm dev`.** The Linux inotify watch limit is
-exhausted, often by editors. Raise it:
-
-```bash
-echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/60-inotify.conf
-sudo sysctl --system
-```
-
-**Port 5432 already in use.** PaySim uses host port 5433 by default (`POSTGRES_PORT`).
+ 
