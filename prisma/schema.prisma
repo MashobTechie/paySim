@@ -1,12 +1,20 @@
-// PaySim database schema.
+// PaySim database schema — Phase 3.
 //
-// Intentionally empty: the payment, claim and event data models will be designed
-// separately (see docs/payment-lifecycle.md) before any models are added here.
+// Design:      docs/data-model.md, docs/erd.md, docs/database-design.md
+// Behaviour:   docs/payment-lifecycle.md (revision 5)
+// Concurrency: docs/transaction-design.md
 //
-// Rules that will govern every model added to this file:
-//   - Monetary amounts are stored as integer minor units (BigInt) or Decimal — never Float.
-//   - Payment events are append-only and carry their own identifiers for traceability.
-//   - Idempotency keys are enforced with unique constraints, not application checks alone.
+// Conventions
+//   - Three PostgreSQL schemas: simconfig (global catalogue), paysim (PaySim side),
+//     simbank (simulated bank side; PaySim's role has no access).
+//   - IDs are UUIDv7 from simconfig.uuidv7() (created in the first migration).
+//   - Money is BIGINT minor units + CHAR(3) ISO 4217 currency. No Decimal, no Float.
+//   - Every simulation-owned record carries a non-null simulationRunId. References between
+//     run-owned records are composite (fk, simulationRunId) -> parent(id, simulationRunId).
+//   - Constraints Prisma cannot express (CHECKs, partial unique indexes, triggers,
+//     append-only enforcement, grants) live in SQL migrations. See database-design.md.
+//   - Future migrations must be created with `prisma migrate dev --create-only` and reviewed:
+//     Prisma does not model the partial indexes, checks or triggers.
 
 generator client {
   provider            = "prisma-client"
@@ -17,4 +25,1207 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["simconfig", "paysim", "simbank"]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum OperatorAction {
+  CREATE_PAYOUT
+  CORRECT_PAYMENT_RECIPIENT
+  APPROVE_PAYMENT
+  REJECT_PAYMENT
+  CANCEL_PAYMENT
+  MANAGE_RECIPIENTS
+  RESOLVE_ANOMALY
+  RESOLVE_CRITICAL_ANOMALY
+  REOPEN_ANOMALY
+  ADD_ANOMALY_NOTE
+  RESOLVE_ATTEMPT
+  REQUEUE_EVENT
+
+  @@schema("simconfig")
+}
+
+enum RunType {
+  SCENARIO
+  REPLAY
+
+  @@schema("paysim")
+}
+
+enum RunStatus {
+  CREATED
+  ACTIVE
+  COMPLETED
+  ABORTED
+
+  @@schema("paysim")
+}
+
+enum PaymentType {
+  CLAIM_PAYOUT
+
+  @@schema("paysim")
+}
+
+enum PaymentStatus {
+  PENDING_RECIPIENT_VERIFICATION
+  RECIPIENT_VERIFICATION_FAILED
+  PENDING_APPROVAL
+  READY_FOR_PAYMENT
+  PROCESSING
+  SETTLED
+  FAILED
+  CANCELLED
+  REJECTED
+
+  @@schema("paysim")
+}
+
+enum PaymentTrigger {
+  PAYMENT_CREATED
+  RECIPIENT_VERIFIED
+  RECIPIENT_VERIFICATION_FAILED
+  RECIPIENT_UPDATED
+  APPROVE
+  REJECT
+  CANCEL
+  DISPATCH
+  SETTLEMENT_CONFIRMED
+  ATTEMPT_FAILED_RETRYABLE
+  PAYMENT_FAILED
+
+  @@schema("paysim")
+}
+
+enum AttemptStatus {
+  PENDING
+  SUBMITTED
+  UNKNOWN
+  SUCCEEDED
+  FAILED_RETRYABLE
+  FAILED_PERMANENT
+
+  @@schema("paysim")
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  PROVIDER
+
+  @@schema("paysim")
+}
+
+enum CauseType {
+  INBOUND_COMMAND
+  PROVIDER_EVENT
+  BANK_RESPONSE
+  SYSTEM_JOB
+
+  @@schema("paysim")
+}
+
+enum CommandType {
+  CREATE_PAYOUT
+  CORRECT_PAYMENT_RECIPIENT
+  APPROVE_PAYMENT
+  REJECT_PAYMENT
+  CANCEL_PAYMENT
+  CREATE_RECIPIENT
+  UPDATE_RECIPIENT
+  RESOLVE_ANOMALY
+  REOPEN_ANOMALY
+  ADD_ANOMALY_NOTE
+  RESOLVE_ATTEMPT
+  REQUEUE_EVENT
+
+  @@schema("paysim")
+}
+
+enum CommandOutcome {
+  ACCEPTED
+  REJECTED
+  IDEMPOTENT_REPLAY
+
+  @@schema("paysim")
+}
+
+enum IdempotencyOutcome {
+  ACCEPTED
+  REJECTED
+
+  @@schema("paysim")
+}
+
+enum RejectionCode {
+  VALIDATION_FAILED
+  INVALID_TRANSITION
+  CLAIM_ALLOCATION_EXCEEDED
+  SELF_APPROVAL_FORBIDDEN
+  STALE_APPROVAL_TARGET
+  FORBIDDEN
+  VERSION_CONFLICT
+  IDEMPOTENCY_KEY_REUSED
+
+  @@schema("paysim")
+}
+
+enum VerificationOutcome {
+  MATCH
+  TOKEN_MISMATCH
+  EMPTY_NAME
+  ACCOUNT_NOT_FOUND
+  ACCOUNT_NOT_OPEN
+
+  @@schema("paysim")
+}
+
+enum VerificationDisposition {
+  APPLIED
+  STALE_SNAPSHOT
+
+  @@schema("paysim")
+}
+
+enum EventProcessingStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  PROCESSING_ERROR
+  PROCESSING_EXHAUSTED
+
+  @@schema("paysim")
+}
+
+enum EventOutcome {
+  APPLIED
+  NO_OP
+  REJECTED
+
+  @@schema("paysim")
+}
+
+enum EventOutcomeReason {
+  STALE
+  CONFLICT
+  UNKNOWN_REFERENCE
+  AMOUNT_MISMATCH
+  ATTEMPT_SUPERSEDED
+
+  @@schema("paysim")
+}
+
+enum ReceiptOutcome {
+  NEW_EVENT
+  DUPLICATE_DELIVERY
+  CONFLICTING_PAYLOAD
+  MALFORMED
+  INVALID_SIGNATURE
+
+  @@schema("paysim")
+}
+
+enum ProcessingAttemptResult {
+  COMPLETED
+  TECHNICAL_ERROR
+  LEASE_EXPIRED
+
+  @@schema("paysim")
+}
+
+enum BankInteractionType {
+  VERIFY_ACCOUNT
+  DISPATCH
+  STATUS_QUERY
+
+  @@schema("paysim")
+}
+
+enum BankSubjectType {
+  SNAPSHOT
+  ATTEMPT
+
+  @@schema("paysim")
+}
+
+enum BankResponseKind {
+  RESPONSE
+  NO_RESPONSE
+
+  @@schema("paysim")
+}
+
+enum BankResponseClass {
+  ACKNOWLEDGED
+  SUCCEEDED
+  FAILED_RETRYABLE
+  FAILED_PERMANENT
+  FOUND_PROCESSING
+  NOT_FOUND
+  ACCOUNT_VERIFIED
+  ACCOUNT_NOT_FOUND
+  AMBIGUOUS
+  NO_RESPONSE
+
+  @@schema("paysim")
+}
+
+enum AnomalyType {
+  CONFLICT
+  ATTEMPT_SUPERSEDED
+  AMOUNT_MISMATCH
+  CONFLICTING_PAYLOAD
+  EVENT_PROCESSING_EXHAUSTED
+  ATTEMPT_UNRESOLVED
+  UNKNOWN_REFERENCE
+
+  @@schema("paysim")
+}
+
+enum AnomalySeverity {
+  CRITICAL
+  ATTENTION
+
+  @@schema("paysim")
+}
+
+enum AnomalyStatus {
+  OPEN
+  RESOLVED
+
+  @@schema("paysim")
+}
+
+enum AnomalyActionType {
+  OPENED
+  RESOLVED
+  REOPENED
+  NOTE_ADDED
+
+  @@schema("paysim")
+}
+
+enum AnomalyCauseType {
+  INBOUND_COMMAND
+  ATTEMPT_STATUS_CHANGE
+  PROCESSING_ATTEMPT
+  SYSTEM_JOB
+
+  @@schema("paysim")
+}
+
+enum ResolutionType {
+  NO_FINANCIAL_IMPACT
+  FINANCIAL_IMPACT_CONFIRMED
+  DETECTOR_ERROR
+  CONDITION_CLEARED
+
+  @@schema("paysim")
+}
+
+enum EvidenceType {
+  PROVIDER_EVENT
+  WEBHOOK_DELIVERY
+  BANK_REQUEST
+  BANK_RESPONSE
+  ATTEMPT_STATUS_CHANGE
+  PROCESSING_ATTEMPT
+
+  @@schema("paysim")
+}
+
+enum DivergenceType {
+  REQUEST_MISMATCH
+  PLAYBACK_MISS
+  UNUSED_RECORDING
+  COMMAND_OUTCOME_MISMATCH
+  REJECTION_CODE_MISMATCH
+  TRANSITIONS_MISMATCH
+  EVENT_OUTCOME_MISMATCH
+  RECEIPT_OUTCOME_MISMATCH
+
+  @@schema("paysim")
+}
+
+enum BankAccountStatus {
+  OPEN
+  CLOSED
+  DORMANT
+
+  @@schema("simbank")
+}
+
+enum BankInstructionStatus {
+  RECEIVED
+  PROCESSING
+  SETTLED
+  FAILED
+  REFUSED_LATE
+
+  @@schema("simbank")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// simconfig — global catalogue (not simulation-owned)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ConfigurationProfile {
+  id          String                        @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  name        String                        @unique
+  description String?
+  createdAt   DateTime                      @default(now()) @db.Timestamptz(6)
+  versions    ConfigurationProfileVersion[]
+
+  @@schema("simconfig")
+}
+
+model ConfigurationProfileVersion {
+  id                    String                        @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  profileId             String                        @db.Uuid
+  profile               ConfigurationProfile          @relation(fields: [profileId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  versionNo             Int
+  contentHash           String
+  eventRetryLimit       Int
+  eventBackoffBaseMs    Int
+  processingLeaseMs     Int
+  pollLeaseMs           Int
+  /// Versioned failure-injection configuration document. Its structure is defined in the
+  /// failure-injection phase; it is immutable and covered by contentHash.
+  failureInjectionRules Json
+  publishedAt           DateTime                      @default(now()) @db.Timestamptz(6)
+  banks                 ConfigurationBankDefinition[]
+  runs                  SimulationRun[]
+
+  @@unique([profileId, versionNo])
+  @@schema("simconfig")
+}
+
+model ConfigurationBankDefinition {
+  id                     String                      @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  profileVersionId       String                      @db.Uuid
+  profileVersion         ConfigurationProfileVersion @relation(fields: [profileVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode           String
+  settlementWindowMs     Int
+  acceptanceTtlMs        Int
+  escalationThresholdMs  Int
+  attemptRetryLimit      Int
+  attemptBackoffMs       Int[]
+  queryabilityGuaranteed Boolean
+
+  @@unique([profileVersionId, providerCode])
+  @@schema("simconfig")
+}
+
+/// Synthetic development identity allowlist. NOT authentication (D32).
+model SyntheticOperator {
+  id          String                        @id
+  displayName String
+  active      Boolean                       @default(true)
+  createdAt   DateTime                      @default(now()) @db.Timestamptz(6)
+  permissions SyntheticOperatorPermission[]
+
+  @@schema("simconfig")
+}
+
+model SyntheticOperatorPermission {
+  operatorId String
+  operator   SyntheticOperator @relation(fields: [operatorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  action     OperatorAction
+
+  @@id([operatorId, action])
+  @@schema("simconfig")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — runs and run configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SimulationRun {
+  id                            String                      @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  runReference                  String                      @unique @default(dbgenerated("simconfig.next_run_reference()"))
+  type                          RunType
+  status                        RunStatus                   @default(CREATED)
+  diverged                      Boolean                     @default(false)
+  sourceRunId                   String?                     @db.Uuid
+  sourceRun                     SimulationRun?              @relation("ReplaySource", fields: [sourceRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  replays                       SimulationRun[]             @relation("ReplaySource")
+  configurationProfileVersionId String                      @db.Uuid
+  configurationProfileVersion   ConfigurationProfileVersion @relation(fields: [configurationProfileVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  eventRetryLimit               Int
+  eventBackoffBaseMs            Int
+  processingLeaseMs             Int
+  pollLeaseMs                   Int
+  simulatedClockAt              DateTime?                   @db.Timestamptz(6)
+  createdAt                     DateTime                    @default(now()) @db.Timestamptz(6)
+  activatedAt                   DateTime?                   @db.Timestamptz(6)
+  completedAt                   DateTime?                   @db.Timestamptz(6)
+  abortedAt                     DateTime?                   @db.Timestamptz(6)
+
+  banks                 SimulatedBank[]
+  claims                Claim[]
+  recipients            Recipient[]
+  payments              Payment[]
+  snapshots             RecipientSnapshot[]
+  verificationResults   VerificationResult[]
+  approvals             Approval[]
+  attempts              PaymentAttempt[]
+  attemptStatusChanges  AttemptStatusChange[]
+  transitions           PaymentTransition[]
+  settlements           Settlement[]
+  commands              InboundCommand[]
+  idempotencyRecords    IdempotencyRecord[]
+  providerEvents        ProviderEvent[]
+  webhookDeliveries     WebhookDelivery[]
+  processingAttempts    EventProcessingAttempt[]
+  bankRequests          BankInteractionRequest[]
+  bankResponses         BankInteractionResponse[]
+  anomalies             Anomaly[]
+  anomalyEvidence       AnomalyEvidence[]
+  anomalyActions        AnomalyAction[]
+  divergences           ReplayDivergence[]        @relation("DivergenceRun")
+  bankProfiles          BankRunProfile[]
+  bankAccounts          SimulatedBankAccount[]
+  bankInstructions      BankInstruction[]
+  bankWebhookDispatches BankWebhookDispatch[]
+
+  @@unique([id, sourceRunId])
+  @@schema("paysim")
+}
+
+model SimulatedBank {
+  id                     String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId        String                   @db.Uuid
+  run                    SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode           String
+  settlementWindowMs     Int
+  acceptanceTtlMs        Int
+  escalationThresholdMs  Int
+  attemptRetryLimit      Int
+  attemptBackoffMs       Int[]
+  queryabilityGuaranteed Boolean
+  /// Synthetic per-run webhook signing secret (never logged).
+  signingSecret          String
+  /// SHA-256 (hex) of the cryptographically random ingress key. Plaintext is never stored here.
+  ingressKeyHash         String                   @unique
+  createdAt              DateTime                 @default(now()) @db.Timestamptz(6)
+  attempts               PaymentAttempt[]
+  providerEvents         ProviderEvent[]
+  deliveries             WebhookDelivery[]
+  bankRequests           BankInteractionRequest[]
+
+  @@unique([simulationRunId, providerCode])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — claims and recipients
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Claim {
+  id                         String           @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId            String           @db.Uuid
+  run                        SimulationRun    @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  claimRef                   String
+  approvedPayableAmountMinor BigInt
+  currency                   String           @db.Char(3)
+  approvedForPayout          Boolean          @default(false)
+  description                String?
+  createdAt                  DateTime         @default(now()) @db.Timestamptz(6)
+  payments                   Payment[]        @relation("PaymentClaim")
+  commands                   InboundCommand[] @relation("CommandTargetClaim")
+
+  @@unique([simulationRunId, claimRef])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model Recipient {
+  id                 String              @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId    String              @db.Uuid
+  run                SimulationRun       @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  bankCode           String
+  accountNumber      String
+  accountName        String
+  createdByCommandId String?             @db.Uuid
+  createdByCommand   InboundCommand?     @relation("RecipientCreatedByCommand", fields: [createdByCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  createdAt          DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime            @default(now()) @db.Timestamptz(6)
+  snapshots          RecipientSnapshot[] @relation("SnapshotRecipient")
+
+  @@unique([simulationRunId, bankCode, accountNumber])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — payments
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Payment {
+  id                 String             @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId    String             @db.Uuid
+  run                SimulationRun      @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reference          String
+  paymentType        PaymentType
+  claimId            String             @db.Uuid
+  claim              Claim              @relation("PaymentClaim", fields: [claimId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  amountMinor        BigInt
+  currency           String             @db.Char(3)
+  status             PaymentStatus
+  version            Int                @default(1)
+  currentSnapshotId  String?            @db.Uuid
+  currentSnapshot    RecipientSnapshot? @relation("PaymentCurrentSnapshot", fields: [currentSnapshotId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  createdByActorId   String
+  createdByCommandId String             @db.Uuid
+  createdByCommand   InboundCommand     @relation("PaymentCreatedByCommand", fields: [createdByCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  retryOfPaymentId   String?            @db.Uuid
+  retryOf            Payment?           @relation("PaymentRetryOf", fields: [retryOfPaymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  retries            Payment[]          @relation("PaymentRetryOf")
+  nextDispatchAt     DateTime?          @db.Timestamptz(6)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime           @default(now()) @db.Timestamptz(6)
+
+  snapshots      RecipientSnapshot[] @relation("SnapshotPayment")
+  approval       Approval?           @relation("ApprovalPayment")
+  attempts       PaymentAttempt[]    @relation("AttemptPayment")
+  transitions    PaymentTransition[] @relation("TransitionPayment")
+  settlement     Settlement?         @relation("SettlementPayment")
+  targetedBy     InboundCommand[]    @relation("CommandTargetPayment")
+  resolvedEvents ProviderEvent[]     @relation("EventResolvedPayment")
+  anomalies      Anomaly[]           @relation("AnomalyPayment")
+
+  @@unique([simulationRunId, reference])
+  @@unique([id, simulationRunId])
+  @@index([claimId])
+  @@index([status, nextDispatchAt])
+  @@schema("paysim")
+}
+
+model RecipientSnapshot {
+  id                 String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId    String                   @db.Uuid
+  run                SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  paymentId          String                   @db.Uuid
+  payment            Payment                  @relation("SnapshotPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  snapshotNo         Int
+  recipientId        String?                  @db.Uuid
+  recipient          Recipient?               @relation("SnapshotRecipient", fields: [recipientId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  bankCode           String
+  accountNumber      String
+  accountName        String
+  createdByCommandId String                   @db.Uuid
+  createdByCommand   InboundCommand           @relation("SnapshotCreatedByCommand", fields: [createdByCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  createdAt          DateTime                 @default(now()) @db.Timestamptz(6)
+  currentOf          Payment[]                @relation("PaymentCurrentSnapshot")
+  verifications      VerificationResult[]     @relation("VerificationSnapshot")
+  approvals          Approval[]               @relation("ApprovalSnapshot")
+  attempts           PaymentAttempt[]         @relation("AttemptSnapshot")
+  bankRequests       BankInteractionRequest[] @relation("RequestSubjectSnapshot")
+
+  @@unique([paymentId, snapshotNo])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model VerificationResult {
+  id              String                  @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId String                  @db.Uuid
+  run             SimulationRun           @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  snapshotId      String                  @db.Uuid
+  snapshot        RecipientSnapshot       @relation("VerificationSnapshot", fields: [snapshotId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  bankRequestId   String                  @db.Uuid
+  bankRequest     BankInteractionRequest  @relation("VerificationBankRequest", fields: [bankRequestId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  bankResponseId  String                  @db.Uuid
+  bankResponse    BankInteractionResponse @relation("VerificationBankResponse", fields: [bankResponseId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  outcome         VerificationOutcome
+  suppliedName    String
+  returnedName    String?
+  suppliedTokens  String[]
+  returnedTokens  String[]
+  failureReason   String?
+  disposition     VerificationDisposition
+  verifiedAt      DateTime                @db.Timestamptz(6)
+  approvals       Approval[]              @relation("ApprovalVerification")
+
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model Approval {
+  id                   String             @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId      String             @db.Uuid
+  run                  SimulationRun      @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  paymentId            String             @unique @db.Uuid
+  payment              Payment            @relation("ApprovalPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  snapshotId           String             @db.Uuid
+  snapshot             RecipientSnapshot  @relation("ApprovalSnapshot", fields: [snapshotId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  verificationResultId String             @db.Uuid
+  verificationResult   VerificationResult @relation("ApprovalVerification", fields: [verificationResultId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  amountMinor          BigInt
+  currency             String             @db.Char(3)
+  approverActorId      String
+  commandId            String             @db.Uuid
+  command              InboundCommand     @relation("ApprovalCommand", fields: [commandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  approvedAt           DateTime           @db.Timestamptz(6)
+  attempts             PaymentAttempt[]   @relation("AttemptApproval")
+
+  @@unique([id, simulationRunId])
+  @@unique([paymentId, simulationRunId])
+  @@schema("paysim")
+}
+
+model PaymentAttempt {
+  id                        String            @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId           String            @db.Uuid
+  run                       SimulationRun     @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  paymentId                 String            @db.Uuid
+  payment                   Payment           @relation("AttemptPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  attemptNumber             Int
+  providerCode              String
+  bank                      SimulatedBank     @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  bankReference             String
+  status                    AttemptStatus
+  approvalId                String            @db.Uuid
+  approval                  Approval          @relation("AttemptApproval", fields: [approvalId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  snapshotId                String            @db.Uuid
+  snapshot                  RecipientSnapshot @relation("AttemptSnapshot", fields: [snapshotId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  amountMinor               BigInt
+  currency                  String            @db.Char(3)
+  acceptanceDeadline        DateTime          @db.Timestamptz(6)
+  nextStatusQueryAt         DateTime?         @db.Timestamptz(6)
+  statusQueryCount          Int               @default(0)
+  earliestQualifyingQueryAt DateTime?         @db.Timestamptz(6)
+  escalateAt                DateTime?         @db.Timestamptz(6)
+  escalatedAt               DateTime?         @db.Timestamptz(6)
+  pollClaimToken            String?           @db.Uuid
+  pollLeaseExpiresAt        DateTime?         @db.Timestamptz(6)
+  pollGeneration            Int               @default(0)
+  createdAt                 DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt                 DateTime          @default(now()) @db.Timestamptz(6)
+
+  statusChanges      AttemptStatusChange[]    @relation("AttemptStatusChangeAttempt")
+  relatedTransitions PaymentTransition[]      @relation("TransitionRelatedAttempt")
+  settlements        Settlement[]             @relation("SettlementAttempt")
+  resolvedEvents     ProviderEvent[]          @relation("EventResolvedAttempt")
+  bankRequests       BankInteractionRequest[] @relation("RequestSubjectAttempt")
+  anomalies          Anomaly[]                @relation("AnomalyAttempt")
+
+  @@unique([paymentId, attemptNumber])
+  @@unique([simulationRunId, providerCode, bankReference])
+  @@unique([id, simulationRunId])
+  @@index([status, nextStatusQueryAt])
+  @@schema("paysim")
+}
+
+model AttemptStatusChange {
+  id                   String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId      String                   @db.Uuid
+  run                  SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  attemptId            String                   @db.Uuid
+  attempt              PaymentAttempt           @relation("AttemptStatusChangeAttempt", fields: [attemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sequenceNo           Int
+  fromStatus           AttemptStatus?
+  toStatus             AttemptStatus
+  causeType            CauseType
+  causeBankResponseId  String?                  @db.Uuid
+  causeBankResponse    BankInteractionResponse? @relation("AttemptChangeCauseBankResponse", fields: [causeBankResponseId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeProviderEventId String?                  @db.Uuid
+  causeProviderEvent   ProviderEvent?           @relation("AttemptChangeCauseEvent", fields: [causeProviderEventId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeCommandId       String?                  @db.Uuid
+  causeCommand         InboundCommand?          @relation("AttemptChangeCauseCommand", fields: [causeCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeJob             String?
+  actorType            ActorType
+  actorId              String
+  createdAt            DateTime                 @default(now()) @db.Timestamptz(6)
+  anomalyEvidence      AnomalyEvidence[]        @relation("EvidenceAttemptStatusChange")
+  anomalyActions       AnomalyAction[]          @relation("ActionCauseAttemptChange")
+
+  @@unique([attemptId, sequenceNo])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model PaymentTransition {
+  id                   String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId      String                   @db.Uuid
+  run                  SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  paymentId            String                   @db.Uuid
+  payment              Payment                  @relation("TransitionPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sequenceNo           Int
+  fromStatus           PaymentStatus?
+  toStatus             PaymentStatus
+  trigger              PaymentTrigger
+  causeType            CauseType
+  causeCommandId       String?                  @db.Uuid
+  causeCommand         InboundCommand?          @relation("TransitionCauseCommand", fields: [causeCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeProviderEventId String?                  @db.Uuid
+  causeProviderEvent   ProviderEvent?           @relation("TransitionCauseEvent", fields: [causeProviderEventId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeBankResponseId  String?                  @db.Uuid
+  causeBankResponse    BankInteractionResponse? @relation("TransitionCauseBankResponse", fields: [causeBankResponseId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeJob             String?
+  relatedAttemptId     String?                  @db.Uuid
+  relatedAttempt       PaymentAttempt?          @relation("TransitionRelatedAttempt", fields: [relatedAttemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  actorType            ActorType
+  actorId              String
+  reason               String?
+  createdAt            DateTime                 @default(now()) @db.Timestamptz(6)
+
+  @@unique([paymentId, sequenceNo])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model Settlement {
+  id                   String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId      String                   @db.Uuid
+  run                  SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  paymentId            String                   @unique @db.Uuid
+  payment              Payment                  @relation("SettlementPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  attemptId            String                   @db.Uuid
+  attempt              PaymentAttempt           @relation("SettlementAttempt", fields: [attemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  amountMinor          BigInt
+  currency             String                   @db.Char(3)
+  causeType            CauseType
+  causeProviderEventId String?                  @db.Uuid
+  causeProviderEvent   ProviderEvent?           @relation("SettlementCauseEvent", fields: [causeProviderEventId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeBankResponseId  String?                  @db.Uuid
+  causeBankResponse    BankInteractionResponse? @relation("SettlementCauseBankResponse", fields: [causeBankResponseId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeCommandId       String?                  @db.Uuid
+  causeCommand         InboundCommand?          @relation("SettlementCauseCommand", fields: [causeCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  settledAt            DateTime                 @db.Timestamptz(6)
+
+  @@unique([id, simulationRunId])
+  @@unique([paymentId, simulationRunId])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — commands and idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+
+model InboundCommand {
+  id                        String           @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId           String           @db.Uuid
+  run                       SimulationRun    @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  commandType               CommandType
+  apiVersion                String
+  actorType                 ActorType
+  actorId                   String
+  requestId                 String
+  idempotencyKey            String?
+  requestFingerprint        String
+  /// Canonical request payload: the replay input (§9.2).
+  payload                   Json
+  targetPaymentId           String?          @db.Uuid
+  targetPayment             Payment?         @relation("CommandTargetPayment", fields: [targetPaymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  targetClaimId             String?          @db.Uuid
+  targetClaim               Claim?           @relation("CommandTargetClaim", fields: [targetClaimId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  outcome                   CommandOutcome
+  rejectionCode             RejectionCode?
+  rejectionMessage          String?
+  originalCommandId         String?          @db.Uuid
+  originalCommand           InboundCommand?  @relation("CommandOriginal", fields: [originalCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  replays                   InboundCommand[] @relation("CommandOriginal")
+  resultingPaymentReference String?
+  receivedAt                DateTime         @db.Timestamptz(6)
+
+  createdRecipients    Recipient[]           @relation("RecipientCreatedByCommand")
+  createdPayments      Payment[]             @relation("PaymentCreatedByCommand")
+  createdSnapshots     RecipientSnapshot[]   @relation("SnapshotCreatedByCommand")
+  approvals            Approval[]            @relation("ApprovalCommand")
+  attemptStatusChanges AttemptStatusChange[] @relation("AttemptChangeCauseCommand")
+  transitions          PaymentTransition[]   @relation("TransitionCauseCommand")
+  settlements          Settlement[]          @relation("SettlementCauseCommand")
+  idempotencyRecords   IdempotencyRecord[]   @relation("IdempotencyCommand")
+  anomalyActions       AnomalyAction[]       @relation("ActionCauseCommand")
+  sourceDivergences    ReplayDivergence[]    @relation("DivergenceSourceCommand")
+  replayDivergences    ReplayDivergence[]    @relation("DivergenceReplayCommand")
+
+  @@unique([id, simulationRunId])
+  @@index([simulationRunId, receivedAt])
+  @@schema("paysim")
+}
+
+model IdempotencyRecord {
+  id                 String             @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId    String             @db.Uuid
+  run                SimulationRun      @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actorId            String
+  idempotencyKey     String
+  requestFingerprint String
+  commandType        CommandType
+  apiVersion         String
+  outcome            IdempotencyOutcome
+  rejectionCode      RejectionCode?
+  responseStatus     Int
+  responseBody       Json
+  commandId          String             @db.Uuid
+  command            InboundCommand     @relation("IdempotencyCommand", fields: [commandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
+
+  @@unique([simulationRunId, actorId, idempotencyKey])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — provider events and webhooks
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ProviderEvent {
+  id                String                @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId   String                @db.Uuid
+  run               SimulationRun         @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode      String
+  bank              SimulatedBank         @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  providerEventId   String
+  eventType         String
+  bankReference     String
+  amountMinor       BigInt?
+  currency          String?               @db.Char(3)
+  canonicalPayload  Json
+  payloadHash       String
+  firstReceivedAt   DateTime              @db.Timestamptz(6)
+  processingStatus  EventProcessingStatus @default(RECEIVED)
+  attemptCount      Int                   @default(0)
+  claimToken        String?               @db.Uuid
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?             @db.Timestamptz(6)
+  nextAttemptAt     DateTime?             @db.Timestamptz(6)
+  lastError         String?
+  requeueGeneration Int                   @default(0)
+  outcome           EventOutcome?
+  outcomeReason     EventOutcomeReason?
+  processedAt       DateTime?             @db.Timestamptz(6)
+  resolvedAttemptId String?               @db.Uuid
+  resolvedAttempt   PaymentAttempt?       @relation("EventResolvedAttempt", fields: [resolvedAttemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  resolvedPaymentId String?               @db.Uuid
+  resolvedPayment   Payment?              @relation("EventResolvedPayment", fields: [resolvedPaymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+
+  deliveries           WebhookDelivery[]        @relation("DeliveryEvent")
+  processingAttempts   EventProcessingAttempt[] @relation("ProcessingAttemptEvent")
+  attemptStatusChanges AttemptStatusChange[]    @relation("AttemptChangeCauseEvent")
+  transitions          PaymentTransition[]      @relation("TransitionCauseEvent")
+  settlements          Settlement[]             @relation("SettlementCauseEvent")
+  anomalies            Anomaly[]                @relation("AnomalyEvent")
+  anomalyEvidence      AnomalyEvidence[]        @relation("EvidenceProviderEvent")
+  sourceDivergences    ReplayDivergence[]       @relation("DivergenceSourceEvent")
+  replayDivergences    ReplayDivergence[]       @relation("DivergenceReplayEvent")
+
+  @@unique([simulationRunId, providerCode, providerEventId])
+  @@unique([id, simulationRunId])
+  @@index([processingStatus, nextAttemptAt])
+  @@index([processingStatus, leaseExpiresAt])
+  @@schema("paysim")
+}
+
+model WebhookDelivery {
+  id                    String             @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId       String             @db.Uuid
+  run                   SimulationRun      @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode          String
+  bank                  SimulatedBank      @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  receivedAt            DateTime           @db.Timestamptz(6)
+  /// Selected request headers (signature, timestamp, content type).
+  headers               Json
+  rawBody               Bytes
+  bodyHash              String
+  signatureValid        Boolean
+  receiptOutcome        ReceiptOutcome
+  httpStatus            Int
+  providerEventRecordId String?            @db.Uuid
+  providerEvent         ProviderEvent?     @relation("DeliveryEvent", fields: [providerEventRecordId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  anomalyEvidence       AnomalyEvidence[]  @relation("EvidenceDelivery")
+  sourceDivergences     ReplayDivergence[] @relation("DivergenceSourceDelivery")
+  replayDivergences     ReplayDivergence[] @relation("DivergenceReplayDelivery")
+
+  @@unique([id, simulationRunId])
+  @@index([simulationRunId, receivedAt])
+  @@schema("paysim")
+}
+
+model EventProcessingAttempt {
+  id                    String                  @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId       String                  @db.Uuid
+  run                   SimulationRun           @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerEventRecordId String                  @db.Uuid
+  providerEvent         ProviderEvent           @relation("ProcessingAttemptEvent", fields: [providerEventRecordId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  claimToken            String                  @db.Uuid
+  worker                String
+  claimedAt             DateTime                @db.Timestamptz(6)
+  endedAt               DateTime                @db.Timestamptz(6)
+  result                ProcessingAttemptResult
+  error                 String?
+  anomalyEvidence       AnomalyEvidence[]       @relation("EvidenceProcessingAttempt")
+  anomalyActions        AnomalyAction[]         @relation("ActionCauseProcessingAttempt")
+
+  @@unique([providerEventRecordId, claimToken])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — bank interactions (requests and responses are separate, insert-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BankInteractionRequest {
+  id                String              @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId   String              @db.Uuid
+  run               SimulationRun       @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode      String
+  bank              SimulatedBank       @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  interactionType   BankInteractionType
+  subjectType       BankSubjectType
+  subjectSnapshotId String?             @db.Uuid
+  subjectSnapshot   RecipientSnapshot?  @relation("RequestSubjectSnapshot", fields: [subjectSnapshotId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  subjectAttemptId  String?             @db.Uuid
+  subjectAttempt    PaymentAttempt?     @relation("RequestSubjectAttempt", fields: [subjectAttemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  readableKey       String
+  occurrenceNo      Int
+  pollGeneration    Int?
+  canonicalPayload  Json
+  payloadHash       String
+  sentAt            DateTime            @db.Timestamptz(6)
+
+  response          BankInteractionResponse? @relation("ResponseRequest")
+  verifications     VerificationResult[]     @relation("VerificationBankRequest")
+  anomalyEvidence   AnomalyEvidence[]        @relation("EvidenceBankRequest")
+  sourceDivergences ReplayDivergence[]       @relation("DivergenceSourceBankRequest")
+  replayDivergences ReplayDivergence[]       @relation("DivergenceReplayBankRequest")
+
+  @@unique([simulationRunId, providerCode, interactionType, readableKey, occurrenceNo])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model BankInteractionResponse {
+  id              String                 @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId String                 @db.Uuid
+  run             SimulationRun          @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requestId       String                 @unique @db.Uuid
+  request         BankInteractionRequest @relation("ResponseRequest", fields: [requestId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  receivedAt      DateTime               @db.Timestamptz(6)
+  kind            BankResponseKind
+  httpStatus      Int?
+  body            Json?
+  signatureValid  Boolean?
+  classification  BankResponseClass
+  elapsedMs       Int
+
+  verifications        VerificationResult[]  @relation("VerificationBankResponse")
+  attemptStatusChanges AttemptStatusChange[] @relation("AttemptChangeCauseBankResponse")
+  transitions          PaymentTransition[]   @relation("TransitionCauseBankResponse")
+  settlements          Settlement[]          @relation("SettlementCauseBankResponse")
+  anomalyEvidence      AnomalyEvidence[]     @relation("EvidenceBankResponse")
+
+  @@unique([id, simulationRunId])
+  @@unique([requestId, simulationRunId])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — anomalies
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Anomaly {
+  id                    String            @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId       String            @db.Uuid
+  run                   SimulationRun     @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  anomalyType           AnomalyType
+  severity              AnomalySeverity
+  evidenceKey           String
+  status                AnomalyStatus     @default(OPEN)
+  lastActionSequenceNo  Int               @default(0)
+  paymentId             String?           @db.Uuid
+  payment               Payment?          @relation("AnomalyPayment", fields: [paymentId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  attemptId             String?           @db.Uuid
+  attempt               PaymentAttempt?   @relation("AnomalyAttempt", fields: [attemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  providerEventRecordId String?           @db.Uuid
+  providerEvent         ProviderEvent?    @relation("AnomalyEvent", fields: [providerEventRecordId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  relatedAnomalyId      String?           @db.Uuid
+  relatedAnomaly        Anomaly?          @relation("AnomalyRelated", fields: [relatedAnomalyId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  relatedBy             Anomaly[]         @relation("AnomalyRelated")
+  detector              String
+  detectedAt            DateTime          @db.Timestamptz(6)
+  /// Transaction that created the anomaly; evidence may only be added in that transaction.
+  createdTxId           BigInt            @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+  evidence              AnomalyEvidence[] @relation("EvidenceAnomaly")
+  actions               AnomalyAction[]   @relation("ActionAnomaly")
+
+  @@unique([simulationRunId, anomalyType, evidenceKey])
+  @@unique([id, simulationRunId])
+  @@schema("paysim")
+}
+
+model AnomalyEvidence {
+  id                            String                   @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId               String                   @db.Uuid
+  run                           SimulationRun            @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  anomalyId                     String                   @db.Uuid
+  anomaly                       Anomaly                  @relation("EvidenceAnomaly", fields: [anomalyId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceType                  EvidenceType
+  evidenceProviderEventId       String?                  @db.Uuid
+  evidenceProviderEvent         ProviderEvent?           @relation("EvidenceProviderEvent", fields: [evidenceProviderEventId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceDeliveryId            String?                  @db.Uuid
+  evidenceDelivery              WebhookDelivery?         @relation("EvidenceDelivery", fields: [evidenceDeliveryId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceBankRequestId         String?                  @db.Uuid
+  evidenceBankRequest           BankInteractionRequest?  @relation("EvidenceBankRequest", fields: [evidenceBankRequestId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceBankResponseId        String?                  @db.Uuid
+  evidenceBankResponse          BankInteractionResponse? @relation("EvidenceBankResponse", fields: [evidenceBankResponseId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceAttemptStatusChangeId String?                  @db.Uuid
+  evidenceAttemptStatusChange   AttemptStatusChange?     @relation("EvidenceAttemptStatusChange", fields: [evidenceAttemptStatusChangeId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  evidenceProcessingAttemptId   String?                  @db.Uuid
+  evidenceProcessingAttempt     EventProcessingAttempt?  @relation("EvidenceProcessingAttempt", fields: [evidenceProcessingAttemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  createdAt                     DateTime                 @default(now()) @db.Timestamptz(6)
+
+  @@schema("paysim")
+}
+
+model AnomalyAction {
+  id                         String                  @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId            String                  @db.Uuid
+  run                        SimulationRun           @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  anomalyId                  String                  @db.Uuid
+  anomaly                    Anomaly                 @relation("ActionAnomaly", fields: [anomalyId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sequenceNo                 Int
+  actionType                 AnomalyActionType
+  actorType                  ActorType
+  actorId                    String
+  causeType                  AnomalyCauseType
+  causeCommandId             String?                 @db.Uuid
+  causeCommand               InboundCommand?         @relation("ActionCauseCommand", fields: [causeCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeAttemptStatusChangeId String?                 @db.Uuid
+  causeAttemptStatusChange   AttemptStatusChange?    @relation("ActionCauseAttemptChange", fields: [causeAttemptStatusChangeId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeProcessingAttemptId   String?                 @db.Uuid
+  causeProcessingAttempt     EventProcessingAttempt? @relation("ActionCauseProcessingAttempt", fields: [causeProcessingAttemptId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  causeJob                   String?
+  reason                     String
+  resolutionType             ResolutionType?
+  followUpReference          String?
+  createdAt                  DateTime                @default(now()) @db.Timestamptz(6)
+
+  @@unique([anomalyId, sequenceNo])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// paysim — replay divergences (cross-run exception 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ReplayDivergence {
+  id                    String                  @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId       String                  @db.Uuid
+  sourceRunId           String                  @db.Uuid
+  /// (replay run, its source run) must match a real replay run (DM4).
+  run                   SimulationRun           @relation("DivergenceRun", fields: [simulationRunId, sourceRunId], references: [id, sourceRunId], onDelete: Restrict, onUpdate: Restrict)
+  divergenceType        DivergenceType
+  divergenceKey         String
+  sourceCommandId       String?                 @db.Uuid
+  sourceCommand         InboundCommand?         @relation("DivergenceSourceCommand", fields: [sourceCommandId, sourceRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sourceDeliveryId      String?                 @db.Uuid
+  sourceDelivery        WebhookDelivery?        @relation("DivergenceSourceDelivery", fields: [sourceDeliveryId, sourceRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sourceProviderEventId String?                 @db.Uuid
+  sourceProviderEvent   ProviderEvent?          @relation("DivergenceSourceEvent", fields: [sourceProviderEventId, sourceRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sourceBankRequestId   String?                 @db.Uuid
+  sourceBankRequest     BankInteractionRequest? @relation("DivergenceSourceBankRequest", fields: [sourceBankRequestId, sourceRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  replayCommandId       String?                 @db.Uuid
+  replayCommand         InboundCommand?         @relation("DivergenceReplayCommand", fields: [replayCommandId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  replayDeliveryId      String?                 @db.Uuid
+  replayDelivery        WebhookDelivery?        @relation("DivergenceReplayDelivery", fields: [replayDeliveryId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  replayProviderEventId String?                 @db.Uuid
+  replayProviderEvent   ProviderEvent?          @relation("DivergenceReplayEvent", fields: [replayProviderEventId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  replayBankRequestId   String?                 @db.Uuid
+  replayBankRequest     BankInteractionRequest? @relation("DivergenceReplayBankRequest", fields: [replayBankRequestId, simulationRunId], references: [id, simulationRunId], onDelete: Restrict, onUpdate: Restrict)
+  sourcePayloadHash     String?
+  replayPayloadHash     String?
+  detail                String?
+  detectedAt            DateTime                @db.Timestamptz(6)
+
+  @@unique([simulationRunId, divergenceType, divergenceKey])
+  @@schema("paysim")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// simbank — the simulated bank's own state (D31). No references into PaySim-side
+// records except the shared run root.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BankRunProfile {
+  id                 String                 @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId    String                 @db.Uuid
+  run                SimulationRun          @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode       String
+  settlementWindowMs Int
+  acceptanceTtlMs    Int
+  signingSecret      String
+  /// The bank's configured webhook endpoint key (bank-side only; never logged).
+  webhookIngressKey  String
+  createdAt          DateTime               @default(now()) @db.Timestamptz(6)
+  accounts           SimulatedBankAccount[]
+  instructions       BankInstruction[]
+  webhookDispatches  BankWebhookDispatch[]
+
+  @@unique([simulationRunId, providerCode])
+  @@schema("simbank")
+}
+
+model SimulatedBankAccount {
+  id              String            @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId String            @db.Uuid
+  run             SimulationRun     @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode    String
+  profile         BankRunProfile    @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  accountNumber   String
+  holderName      String
+  accountStatus   BankAccountStatus
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+
+  @@unique([simulationRunId, providerCode, accountNumber])
+  @@schema("simbank")
+}
+
+model BankInstruction {
+  id                       String                @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId          String                @db.Uuid
+  run                      SimulationRun         @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode             String
+  profile                  BankRunProfile        @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  bankReference            String
+  acceptanceDeadline       DateTime              @db.Timestamptz(6)
+  receivedAt               DateTime              @db.Timestamptz(6)
+  settlementWindowMs       Int
+  visibleAt                DateTime              @db.Timestamptz(6)
+  amountMinor              BigInt
+  currency                 String                @db.Char(3)
+  destinationAccountNumber String
+  status                   BankInstructionStatus
+  failureCode              String?
+  plannedOutcome           String?
+  updatedAt                DateTime              @default(now()) @db.Timestamptz(6)
+
+  @@unique([simulationRunId, providerCode, bankReference])
+  @@schema("simbank")
+}
+
+model BankWebhookDispatch {
+  id              String         @id @default(dbgenerated("simconfig.uuidv7()")) @db.Uuid
+  simulationRunId String         @db.Uuid
+  run             SimulationRun  @relation(fields: [simulationRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerCode    String
+  profile         BankRunProfile @relation(fields: [simulationRunId, providerCode], references: [simulationRunId, providerCode], onDelete: Restrict, onUpdate: Restrict)
+  providerEventId String
+  sendNo          Int
+  bankReference   String
+  eventType       String
+  payload         Json
+  scheduledAt     DateTime       @db.Timestamptz(6)
+  sentAt          DateTime?      @db.Timestamptz(6)
+  httpStatus      Int?
+
+  @@unique([simulationRunId, providerCode, providerEventId, sendNo])
+  @@schema("simbank")
 }

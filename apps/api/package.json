@@ -2,7 +2,7 @@
   "name": "@paysim/api",
   "version": "0.0.0",
   "private": true,
-  "description": "PaySim API — NestJS modular monolith",
+  "description": "PaySim API \u2014 NestJS modular monolith",
   "type": "module",
   "scripts": {
     "generate": "prisma generate",
@@ -12,7 +12,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:db": "prisma generate && vitest run --config vitest.db.config.ts",
+    "test:db:watch": "TEST_DB_REUSE=1 vitest --config vitest.db.config.ts",
+    "db:test:reset": "node scripts/test-db.mjs reset"
   },
   "dependencies": {
     "@nestjs/common": "^12.3.2",
@@ -32,7 +35,9 @@
     "@nestjs/testing": "^12.3.2",
     "@types/express": "^5.0.6",
     "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
+    "pg": "^8.23.1",
     "prisma": "7.10.1",
     "supertest": "^7.3.1",
     "typescript": "~6.0.3",
